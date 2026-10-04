@@ -1,0 +1,124 @@
+# Fork-only. When main has a version this fork has not released yet, builds the Windows
+# installer and publishes it here, so installed apps update from this fork rather than
+# upstream. Mirrors upstream's release-windows job. See FORK.md.
+name: Fork release (Windows)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for an unreleased version
+    if: github.repository_owner != 'DLYZZT'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Compare package version with releases
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Release Windows x64
+    needs: [check]
+    if: needs.check.outputs.release == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Electron runtime for Windows acceptance
+        run: npx install-electron --no
+
+      - name: Install the helper's pinned Rust toolchain
+        working-directory: native/windows-managed-process-helper
+        run: rustup toolchain install
+
+      - name: Build application
+        run: npm run build
+
+      - name: Build authoritative Windows helper
+        run: npm run check:windows-helper-reproducibility
+
+      - name: Prepare verified bundled search tools
+        run: npm run prepare:bundled-tools -- --target win32-x64
+
+      - name: Package Windows x64 with this repository as the update feed
+        shell: bash
+        run: >-
+          npx electron-builder --win nsis --x64 --publish never
+          -c.publish.owner=${{ github.repository_owner }}
+          -c.publish.repo=${{ github.event.repository.name }}
+
+      - name: Verify update feed and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="dist/win-unpacked/resources/app-update.yml"
+          cat "$config"
+          grep -qx "owner: ${{ github.repository_owner }}" "$config"
+          grep -qx "repo: ${{ github.event.repository.name }}" "$config"
+          grep -qx "provider: github" "$config"
+          if grep -q "publisherName" "$config"; then
+            echo "Unsigned build must not pin a publisher" >&2
+            exit 1
+          fi
+          installer="dist/Pi-Agent-Desktop-Unsigned-Beta-Setup-$VERSION.exe"
+          node scripts/verify-update-metadata.mjs dist/latest.yml "$VERSION" "$installer"
+
+      - name: Run packaged toolchain E2E for Windows x64
+        run: npm run check:packaged-toolchains -- win32-x64 --release-helper
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          installer="dist/Pi-Agent-Desktop-Unsigned-Beta-Setup-$VERSION.exe"
+          gh release create "v$VERSION" "$installer" "$installer.blockmap" dist/latest.yml \
+            --target "$GITHUB_SHA" \
+            --title "Pi Agent Desktop $VERSION (with extension panels)" \
+            --notes "Upstream Pi Agent Desktop $VERSION plus Desktop extension panels (DLYZZT/pi-desktop#52). Windows x64, unsigned. See FORK.md."

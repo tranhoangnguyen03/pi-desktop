@@ -1,0 +1,53 @@
+# Fork-only. Checks daily for a new upstream release and opens an "Upgrade to upstream"
+# PR that merges itself once CI passes. See FORK.md.
+name: Fork upstream sync
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream release tag (default latest)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream release
+    if: github.repository_owner != 'DLYZZT'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # A PAT, not GITHUB_TOKEN: pushes from GITHUB_TOKEN do not trigger CI and
+          # cannot change workflow files, and upstream merges sometimes do.
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      # The line-budget check parses sources with TypeScript.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Merge upstream and open PR
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          git config user.name "pi-desktop fork sync"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .github/fork/sync-upstream.sh ${TAG:+"$TAG"}
