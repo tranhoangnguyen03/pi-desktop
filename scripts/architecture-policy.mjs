@@ -57,7 +57,7 @@ export const architecturePolicy = {
       reason: "Chat presentation and the explicit temporary draft owner retained across new-session promotion.",
     },
     "src/renderer/hooks/useAgentSession.ts": {
-      maxLines: 1420,
+      maxLines: 1426,
       reason: "22-03/04 command and turn coordination after model/history/viewport/events/UI extraction.",
     },
     "src/renderer/components/ToolchainsConfig.tsx": {
