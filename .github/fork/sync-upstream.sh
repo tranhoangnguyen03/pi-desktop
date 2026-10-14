@@ -72,7 +72,7 @@ if ! git diff --quiet -- "$policy"; then
 fi
 
 previous_base="$(git merge-base "origin/$base" "$upstream_sha")"
-packaging_changes="$(git diff --name-only "$previous_base" "$upstream_sha" -- .github/workflows electron-builder.yml)"
+packaging_changes="$(git diff --name-only "$previous_base" "$upstream_sha" -- .github/workflows electron-builder.yml scripts/build-mac-release.mjs scripts/prepare-bundled-tools.mjs)"
 
 if [ -n "${DRY_RUN:-}" ]; then
   echo "Dry run: $branch is ready locally ($(git rev-parse --short HEAD))."
@@ -82,7 +82,7 @@ fi
 
 note="No upstream packaging files changed."
 if [ -n "$packaging_changes" ]; then
-  note="Upstream changed packaging files. If the fork release fails after merge, compare \`.github/workflows/fork-release.yml\` with upstream's \`release-windows\` job:
+  note="Upstream changed packaging files. If the fork release fails after merge, compare \`.github/workflows/fork-release.yml\` with upstream's packaging jobs:
 
 \`\`\`
 $packaging_changes

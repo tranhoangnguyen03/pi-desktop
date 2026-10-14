@@ -3,9 +3,11 @@
 This is [DLYZZT/pi-desktop](https://github.com/DLYZZT/pi-desktop) plus one feature:
 **Desktop extension panels** (interactive extension text panels and slash-argument
 completions, proposed upstream as [DLYZZT/pi-desktop#52](https://github.com/DLYZZT/pi-desktop/pull/52)).
-Everything else comes from upstream. Builds are Windows x64 only.
+Everything else comes from upstream. Builds are provided for Windows x64 and
+macOS (Apple Silicon arm64 & Intel x64).
 
-Installed copies update from **this repository's releases**, not upstream's.
+Installed Windows copies update from **this repository's releases**, not upstream's.
+macOS packages are unsigned beta builds downloaded directly from Releases.
 
 ## How it stays current
 
@@ -14,10 +16,10 @@ Installed copies update from **this repository's releases**, not upstream's.
    and opens an "Upgrade to upstream <tag>" PR set to merge itself.
 2. **CI** is upstream's own `build-desktop.yml`, unchanged. Once the required checks pass,
    the PR merges.
-3. **Release** (`.github/workflows/fork-release.yml`) runs on every push to `main`. If
-   `package.json` has a version with no release here yet, it builds the Windows installer
-   with this repository as the update feed and publishes `v<version>`. Installed apps then
-   offer the update.
+3. **Release** (`.github/workflows/fork-release.yml`) runs on every push to `main`
+   (or manual `workflow_dispatch`). If `package.json` has a version with no release
+   here yet, it builds the Windows and macOS packages and publishes `v<version>`.
+   Installed Windows apps then offer the update.
 
 You step in only when:
 
@@ -26,8 +28,8 @@ You step in only when:
   branch, its PR merges itself after CI passes.
 - **CI fails on a sync PR.** The PR stays open. Fix it on the sync branch.
 - **The release job fails.** Nothing is published, so installed apps stay on the previous
-  version. This usually means upstream changed how Windows packages are built (the sync PR
-  says so); update `fork-release.yml` to match upstream's `release-windows` job.
+  version. This usually means upstream changed how packages are built (the sync PR
+  says so); update `fork-release.yml` to match upstream's release jobs.
 
 ## Keeping merges easy
 
@@ -62,3 +64,19 @@ a version bump, after which the fork is ahead of upstream until upstream passes 
 Run this fork's installer once over the existing install. It uses the same app ID and
 name, so it upgrades in place and keeps settings and sessions. To go back to upstream,
 run an upstream installer.
+
+## macOS Installation & Updates (Unsigned Beta)
+
+Because releases from this fork are unsigned, macOS Gatekeeper blocks opening on first launch.
+
+- **To run:** On macOS 15 Sequoia and later, Apple prevents opening unsigned apps via
+  right-click. Go to **System Settings → Privacy & Security** and click **Open Anyway**,
+  or open Terminal and run:
+  ```sh
+  xattr -cr "/Applications/Pi Agent Desktop.app"
+  ```
+- **Updates:** macOS's built-in updater (Squirrel.Mac) requires Apple code signatures and
+  refuses to install unsigned updates. To prevent installation errors, macOS releases do
+  not publish an update feed (`latest-mac.yml`). Checking for updates inside the app will
+  report that the update is not available yet (`UPDATE_NOT_PUBLISHED`). When a new release
+  is published, download the updated DMG or ZIP directly from this repository's Releases page.

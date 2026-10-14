@@ -1,13 +1,19 @@
-# Fork-only. When main has a version this fork has not released yet, builds the Windows
-# installer and publishes it here, so installed apps update from this fork rather than
-# upstream. Mirrors upstream's release-windows job. See FORK.md.
-name: Fork release (Windows)
+# Fork-only. When main has a version this fork has not released yet (or on manual trigger),
+# builds Windows and macOS packages and publishes them here.
+# Installed Windows apps update from this fork; unsigned macOS packages are downloaded
+# directly from Releases. See FORK.md.
+name: Fork release
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Release or update even if this version already exists"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,7 +25,7 @@ concurrency:
 jobs:
   check:
     name: Check for an unreleased version
-    if: github.repository_owner != 'DLYZZT'
+    if: github.repository_owner != 'DLYZZT' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -34,24 +40,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
         run: |
           version="$(node -p "require('./package.json').version")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" >/dev/null 2>&1; then
             echo "v$version is already released."
-            echo "release=false" >> "$GITHUB_OUTPUT"
+            if [ "${FORCE:-false}" = "true" ]; then
+              echo "force=true specified: releasing or updating existing release."
+              echo "release=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "release=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  release:
-    name: Release Windows x64
+  release-windows:
+    name: Build Windows x64
     needs: [check]
     if: needs.check.outputs.release == 'true'
     runs-on: windows-2025
     timeout-minutes: 60
-    permissions:
-      contents: write
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       VERSION: ${{ needs.check.outputs.version }}
@@ -110,15 +120,190 @@ jobs:
       - name: Run packaged toolchain E2E for Windows x64
         run: npm run check:packaged-toolchains -- win32-x64 --release-helper
 
-      - name: Publish release
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pi-desktop-windows-release
+          path: |
+            dist/Pi-Agent-Desktop-Unsigned-Beta-Setup-*.exe
+            dist/Pi-Agent-Desktop-Unsigned-Beta-Setup-*.exe.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  release-macos:
+    name: Build macOS (arm64 & x64)
+    needs: [check]
+    if: needs.check.outputs.release == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Prepare verified bundled search tools
+        run: npm run prepare:bundled-tools -- --target darwin-arm64 --target darwin-x64
+
+      - name: Package macOS with this repository as the update feed
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+        run: >-
+          npx electron-builder --mac dmg zip --arm64 --x64 --publish never
+          -c.publish.owner=${{ github.repository_owner }}
+          -c.publish.repo=${{ github.event.repository.name }}
+
+      - name: Verify packaged macOS update configuration
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          function findUpdateConfigs(directory, matches = []) {
+            for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+              const entryPath = path.join(directory, entry.name);
+              if (entry.isDirectory()) {
+                findUpdateConfigs(entryPath, matches);
+              } else if (
+                entry.isFile() &&
+                entry.name === "app-update.yml" &&
+                entryPath
+                  .split(path.sep)
+                  .join("/")
+                  .endsWith(".app/Contents/Resources/app-update.yml")
+              ) {
+                matches.push(entryPath);
+              }
+            }
+            return matches;
+          }
+
+          function readScalar(document, key) {
+            const match = document.match(new RegExp(`^\\s*${key}\\s*:\\s*([^#\\r\\n]+)`, "mi"));
+            if (!match) throw new Error(`Missing ${key}`);
+            const value = match[1].trim();
+            if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+              return value.slice(1, -1);
+            }
+            return value;
+          }
+
+          function verifyUpdateConfig(file) {
+            const document = fs.readFileSync(file, "utf8");
+            const [expectedOwner, expectedRepo] = process.env.GITHUB_REPOSITORY.split("/");
+            const expected = { provider: "github", owner: expectedOwner, repo: expectedRepo };
+            for (const [key, value] of Object.entries(expected)) {
+              const actual = readScalar(document, key);
+              if (actual !== value) {
+                throw new Error(`${file}: ${key} does not match expected release repository`);
+              }
+            }
+            console.log(`Validated ${file}`);
+          }
+
+          const configs = findUpdateConfigs("dist").sort();
+          if (configs.length !== 2) {
+            throw new Error(`Expected two packaged macOS app-update.yml files, found ${configs.length}`);
+          }
+          configs.forEach(verifyUpdateConfig);
+          NODE
+
+      - name: Verify macOS release artifacts
+        shell: bash
         run: |
           set -euo pipefail
-          installer="dist/Pi-Agent-Desktop-Unsigned-Beta-Setup-$VERSION.exe"
-          gh release create "v$VERSION" "$installer" "$installer.blockmap" dist/latest.yml \
-            --target "$GITHUB_SHA" \
-            --title "Pi Agent Desktop $VERSION (with extension panels)" \
-            --notes "Upstream Pi Agent Desktop $VERSION plus Desktop extension panels (DLYZZT/pi-desktop#52). Windows x64, unsigned. See FORK.md."
+          for file in \
+            "dist/Pi-Agent-Desktop-${VERSION}-arm64.dmg" \
+            "dist/Pi-Agent-Desktop-${VERSION}-arm64.zip" \
+            "dist/Pi-Agent-Desktop-${VERSION}-x64.dmg" \
+            "dist/Pi-Agent-Desktop-${VERSION}-x64.zip"; do
+            test -s "$file"
+          done
+
+      - name: Run packaged toolchain E2E for macOS arm64
+        run: npm run check:packaged-toolchains -- darwin-arm64
+
+      - name: Run packaged toolchain static check for macOS x64
+        run: npm run check:packaged-toolchains -- darwin-x64 --static
+
+      - name: Upload macOS release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pi-desktop-macos-release
+          # Do not upload latest-mac.yml: Squirrel.Mac fails on unsigned auto-updates.
+          path: |
+            dist/Pi-Agent-Desktop-*-arm64.dmg
+            dist/Pi-Agent-Desktop-*-arm64.dmg.blockmap
+            dist/Pi-Agent-Desktop-*-arm64.zip
+            dist/Pi-Agent-Desktop-*-arm64.zip.blockmap
+            dist/Pi-Agent-Desktop-*-x64.dmg
+            dist/Pi-Agent-Desktop-*-x64.dmg.blockmap
+            dist/Pi-Agent-Desktop-*-x64.zip
+            dist/Pi-Agent-Desktop-*-x64.zip.blockmap
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: [check, release-windows, release-macos]
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Download Windows release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: pi-desktop-windows-release
+          path: release-artifacts/windows
+
+      - name: Download macOS release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: pi-desktop-macos-release
+          path: release-artifacts/macos
+
+      - name: Publish or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="Upstream Pi Agent Desktop $VERSION plus Desktop extension panels (DLYZZT/pi-desktop#52). Windows x64 and macOS (arm64 & x64), unsigned beta. See FORK.md."
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION exists, uploading new artifacts without overwriting existing files..."
+            existing_assets="$(gh release view "v$VERSION" --json assets --jq '.assets[].name')"
+            for file in release-artifacts/*/*; do
+              filename="$(basename "$file")"
+              if echo "$existing_assets" | grep -qx "$filename"; then
+                echo "$filename already exists on v$VERSION; keeping existing asset."
+              else
+                echo "Uploading $filename to v$VERSION..."
+                gh release upload "v$VERSION" "$file"
+              fi
+            done
+            gh release edit "v$VERSION" --notes "$notes"
+          else
+            echo "Creating release v$VERSION..."
+            gh release create "v$VERSION" release-artifacts/*/* \
+              --target "$GITHUB_SHA" \
+              --title "Pi Agent Desktop $VERSION (with extension panels)" \
+              --notes "$notes"
+          fi
